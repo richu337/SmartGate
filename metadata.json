@@ -1,0 +1,6 @@
+{
+  "name": "Smart Network Access Manager",
+  "description": "Monitor, manage, and secure devices connected to your Wi-Fi networks and mobile hotspots. Features real-time tracking, device blocking, parent-controlled access scheduling, and AI-powered network security threat analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
