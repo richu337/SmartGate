@@ -5,6 +5,7 @@
 
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import { NetworkDevice, AccessSchedule, ActivityLog, Network } from './src/types.js';
@@ -19,14 +20,18 @@ let supabase: any = null;
 let isDbActive = false;
 let lastDbError: string | null = null;
 
-if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
-  try {
-    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
-      auth: { persistSession: false }
-    });
-    console.log('Supabase client initialized with URL:', process.env.SUPABASE_URL);
-  } catch (err) {
-    console.error('Failed to initialize Supabase client:', err);
+if (process.env.SUPABASE_URL) {
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (supabaseKey) {
+    try {
+      supabase = createClient(process.env.SUPABASE_URL, supabaseKey, {
+        auth: { persistSession: false }
+      });
+      const keyType = process.env.SUPABASE_SERVICE_ROLE_KEY ? 'SERVICE_ROLE (RLS bypass enabled)' : 'ANON_KEY';
+      console.log(`Supabase client successfully initialized with ${keyType} for administrative database access.`);
+    } catch (err) {
+      console.error('Failed to initialize Supabase client:', err);
+    }
   }
 }
 
@@ -53,6 +58,45 @@ function mapDeviceToFront(d: any): NetworkDevice {
   };
 }
 
+let devicesColumns = {
+  registered_at: true,
+  risk_rating: true,
+  risk_details: true,
+};
+
+async function detectDevicesColumns() {
+  if (!supabase) return;
+  try {
+    const { error: regErr } = await supabase.from('devices').select('registered_at').limit(1);
+    if (regErr) {
+      console.warn('Supabase: Column "registered_at" not detected in "devices" table. Disabling sync for this column.');
+      devicesColumns.registered_at = false;
+    }
+  } catch (e) {
+    devicesColumns.registered_at = false;
+  }
+
+  try {
+    const { error: ratingErr } = await supabase.from('devices').select('risk_rating').limit(1);
+    if (ratingErr) {
+      console.warn('Supabase: Column "risk_rating" not detected in "devices" table. Disabling sync for this column.');
+      devicesColumns.risk_rating = false;
+    }
+  } catch (e) {
+    devicesColumns.risk_rating = false;
+  }
+
+  try {
+    const { error: detailsErr } = await supabase.from('devices').select('risk_details').limit(1);
+    if (detailsErr) {
+      console.warn('Supabase: Column "risk_details" not detected in "devices" table. Disabling sync for this column.');
+      devicesColumns.risk_details = false;
+    }
+  } catch (e) {
+    devicesColumns.risk_details = false;
+  }
+}
+
 function mapDeviceToDb(d: Partial<NetworkDevice>): any {
   const db: any = {};
   if (d.id !== undefined) db.id = d.id;
@@ -69,9 +113,9 @@ function mapDeviceToDb(d: Partial<NetworkDevice>): any {
   if (d.category !== undefined) db.category = d.category;
   if (d.lastActive !== undefined) db.last_active = d.lastActive;
   if (d.isBlockedByPolicy !== undefined) db.is_blocked_by_policy = d.isBlockedByPolicy;
-  if (d.registeredAt !== undefined) db.registered_at = d.registeredAt;
-  if (d.riskRating !== undefined) db.risk_rating = d.riskRating;
-  if (d.riskDetails !== undefined) db.risk_details = d.riskDetails;
+  if (d.registeredAt !== undefined && devicesColumns.registered_at) db.registered_at = d.registeredAt;
+  if (d.riskRating !== undefined && devicesColumns.risk_rating) db.risk_rating = d.riskRating;
+  if (d.riskDetails !== undefined && devicesColumns.risk_details) db.risk_details = d.riskDetails;
   return db;
 }
 
@@ -311,6 +355,46 @@ let logs: ActivityLog[] = [
   },
 ];
 
+const STORAGE_FILE = path.join(process.cwd(), 'local_storage.json');
+
+// Helper to save all states to local JSON file
+function saveLocalState() {
+  try {
+    const data = {
+      currentNetwork,
+      devices,
+      schedules,
+      logs,
+    };
+    fs.writeFileSync(STORAGE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Error saving state to local_storage.json:', err);
+  }
+}
+
+// Helper to load all states from local JSON file
+function loadLocalState() {
+  try {
+    if (fs.existsSync(STORAGE_FILE)) {
+      const content = fs.readFileSync(STORAGE_FILE, 'utf-8');
+      const data = JSON.parse(content);
+      if (data.currentNetwork) currentNetwork = data.currentNetwork;
+      if (data.devices) devices = data.devices;
+      if (data.schedules) schedules = data.schedules;
+      if (data.logs) logs = data.logs;
+      console.log('Successfully loaded persisted state from local_storage.json');
+    } else {
+      console.log('No local_storage.json found. Creating initial seed file...');
+      saveLocalState();
+    }
+  } catch (err) {
+    console.error('Error loading state from local_storage.json:', err);
+  }
+}
+
+// Load local state initially (if exists, it will overwrite the default arrays declared above)
+loadLocalState();
+
 // Helper to add activity logs
 async function addLog(deviceName: string, deviceMac: string, type: ActivityLog['type'], details: string, severity: ActivityLog['severity']) {
   const newLog: ActivityLog = {
@@ -337,6 +421,8 @@ async function addLog(deviceName: string, deviceMac: string, type: ActivityLog['
       console.error('Failed to write log to Supabase:', err);
     }
   }
+
+  saveLocalState();
 }
 
 // REST API Endpoints
@@ -351,6 +437,7 @@ app.post('/api/network', (req, res) => {
   const { name, ssid } = req.body;
   if (name) currentNetwork.name = name;
   if (ssid) currentNetwork.ssid = ssid;
+  saveLocalState();
   res.json({ success: true, network: currentNetwork });
 });
 
@@ -411,6 +498,7 @@ app.post('/api/devices/modify', async (req, res) => {
     }
   }
 
+  saveLocalState();
   res.json({ success: true, device: dev });
 });
 
@@ -459,6 +547,7 @@ app.post('/api/devices', async (req, res) => {
     }
   }
 
+  saveLocalState();
   res.json({ success: true, device: newDev });
 });
 
@@ -471,28 +560,46 @@ app.delete('/api/devices/:id', async (req, res) => {
   }
 
   const dev = devices[devIndex];
-  devices.splice(devIndex, 1);
 
-  // Clean related schedules
+  // Delete from Supabase first if DB active
+  if (isDbActive && supabase) {
+    try {
+      // First delete any schedules belonging to this device
+      const { error: schedError } = await supabase.from('schedules').delete().eq('device_id', id);
+      if (schedError) {
+        console.error('Failed to clear schedules from Supabase during device delete:', schedError);
+        return res.status(500).json({ 
+          error: `Failed to remove related schedules from Supabase database: ${schedError.message}`, 
+          details: schedError 
+        });
+      }
+
+      // Then delete the device
+      const { error: devError } = await supabase.from('devices').delete().eq('id', id);
+      if (devError) {
+        console.error('Failed to delete device row from Supabase:', devError);
+        return res.status(500).json({ 
+          error: `Failed to remove device from Supabase database (Check RLS Policies or Service Role Config): ${devError.message}`, 
+          details: devError 
+        });
+      }
+      console.log(`Successfully deleted device ${dev.name} (${id}) from Supabase database.`);
+    } catch (err: any) {
+      console.error('Failed to sync device lease purging on Supabase:', err);
+      return res.status(500).json({ 
+        error: `Database exception during deletion sync: ${err.message || err}`, 
+        details: err 
+      });
+    }
+  }
+
+  // Splicing memory buffers ONLY after successful DB deletion
+  devices.splice(devIndex, 1);
   schedules = schedules.filter((s) => s.deviceId !== id);
 
   await addLog(dev.name, dev.mac, 'disconnection', `Device lease physically removed or cleared by administrator.`, 'info');
 
-  // Delete from Supabase if DB active
-  if (isDbActive && supabase) {
-    try {
-      // First delete any schedules belonging to this device
-      await supabase.from('schedules').delete().eq('device_id', id);
-      // Then delete the device
-      const { error } = await supabase.from('devices').delete().eq('id', id);
-      if (error) {
-        console.error('Failed to delete device row from Supabase:', error);
-      }
-    } catch (err) {
-      console.error('Failed to sync device lease purging on Supabase:', err);
-    }
-  }
-
+  saveLocalState();
   res.json({ success: true });
 });
 
@@ -536,6 +643,7 @@ app.post('/api/schedules', async (req, res) => {
     }
   }
 
+  saveLocalState();
   res.json({ success: true, schedule: newSched });
 });
 
@@ -563,6 +671,7 @@ app.delete('/api/schedules/:id', async (req, res) => {
       }
     }
 
+    saveLocalState();
     return res.json({ success: true });
   }
   res.status(404).json({ error: 'Schedule trigger not found.' });
@@ -592,6 +701,7 @@ app.post('/api/schedules/toggle', async (req, res) => {
       }
     }
 
+    saveLocalState();
     return res.json({ success: true, schedule: s });
   }
   res.status(404).json({ error: 'Schedule trigger not found.' });
@@ -679,6 +789,7 @@ app.post('/api/network/scan', async (req, res) => {
     }
   }
 
+  saveLocalState();
   res.json({ success: true, devices });
 });
 
@@ -853,6 +964,7 @@ async function syncAndLoadWithSupabase() {
     return;
   }
   try {
+    await detectDevicesColumns();
     const { data: test, error: testErr } = await supabase.from('devices').select('id').limit(1);
     if (testErr) {
       if (
@@ -874,13 +986,8 @@ async function syncAndLoadWithSupabase() {
     if (devRows && devRows.length > 0) {
       devices = devRows.map(mapDeviceToFront);
     } else {
-      console.log('Seeding empty Supabase devices table with initial device manifest...');
-      const seedDevs = devices.map(mapDeviceToDb);
-      const { error: seedErr } = await supabase.from('devices').insert(seedDevs);
-      if (seedErr) {
-        console.error('Failed to seed Supabase devices:', JSON.stringify(seedErr, null, 2));
-        throw new Error(`Failed to seed Supabase devices: ${seedErr.message || JSON.stringify(seedErr)}`);
-      }
+      console.log('Supabase devices table is empty.');
+      devices = [];
     }
 
     // Load schedules
@@ -889,13 +996,8 @@ async function syncAndLoadWithSupabase() {
     if (schedRows && schedRows.length > 0) {
       schedules = schedRows.map(mapScheduleToFront);
     } else {
-      console.log('Seeding empty Supabase schedules table with bedtime lockouts...');
-      const seedScheds = schedules.map(mapScheduleToDb);
-      const { error: seedErr } = await supabase.from('schedules').insert(seedScheds);
-      if (seedErr) {
-        console.error('Failed to seed Supabase schedules:', JSON.stringify(seedErr, null, 2));
-        throw new Error(`Failed to seed Supabase schedules: ${seedErr.message || JSON.stringify(seedErr)}`);
-      }
+      console.log('Supabase schedules table is empty.');
+      schedules = [];
     }
 
     // Load logs
@@ -904,17 +1006,13 @@ async function syncAndLoadWithSupabase() {
     if (logRows && logRows.length > 0) {
       logs = logRows.map(mapLogToFront);
     } else {
-      console.log('Seeding empty Supabase activity_logs table...');
-      const seedLogs = logs.map(mapLogToDb);
-      const { error: seedErr } = await supabase.from('activity_logs').insert(seedLogs);
-      if (seedErr) {
-        console.error('Failed to seed Supabase logs:', JSON.stringify(seedErr, null, 2));
-        throw new Error(`Failed to seed Supabase logs: ${seedErr.message || JSON.stringify(seedErr)}`);
-      }
+      console.log('Supabase activity_logs table is empty.');
+      logs = [];
     }
 
     isDbActive = true;
     lastDbError = null;
+    saveLocalState();
     console.log('⚡ Successfully fully synchronized state with REAL Supabase DB!');
   } catch (err: any) {
     console.error('Failed loading dataset from Supabase:', err.message || err);

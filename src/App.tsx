@@ -163,9 +163,12 @@ export default function App() {
 
         const logsRes = await fetch('/api/logs');
         setLogs(await logsRes.json());
+      } else {
+        alert(`Failed to delete device lease: ${data.error || 'Unknown database error'}`);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Failed to delete target device lease:', e);
+      alert(`Network/Server error deleting device lease: ${e.message || e}`);
     }
   };
 
