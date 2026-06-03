@@ -24,6 +24,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 // server.ts
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
+var import_fs = __toESM(require("fs"), 1);
 var import_vite = require("vite");
 var import_genai = require("@google/genai");
 var import_supabase_js = require("@supabase/supabase-js");
@@ -32,14 +33,18 @@ import_dotenv.default.config();
 var supabase = null;
 var isDbActive = false;
 var lastDbError = null;
-if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
-  try {
-    supabase = (0, import_supabase_js.createClient)(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, {
-      auth: { persistSession: false }
-    });
-    console.log("Supabase client initialized with URL:", process.env.SUPABASE_URL);
-  } catch (err) {
-    console.error("Failed to initialize Supabase client:", err);
+if (process.env.SUPABASE_URL) {
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (supabaseKey) {
+    try {
+      supabase = (0, import_supabase_js.createClient)(process.env.SUPABASE_URL, supabaseKey, {
+        auth: { persistSession: false }
+      });
+      const keyType = process.env.SUPABASE_SERVICE_ROLE_KEY ? "SERVICE_ROLE (RLS bypass enabled)" : "ANON_KEY";
+      console.log(`Supabase client successfully initialized with ${keyType} for administrative database access.`);
+    } catch (err) {
+      console.error("Failed to initialize Supabase client:", err);
+    }
   }
 }
 function mapDeviceToFront(d) {
@@ -63,6 +68,41 @@ function mapDeviceToFront(d) {
     riskDetails: d.risk_details || ""
   };
 }
+var devicesColumns = {
+  registered_at: true,
+  risk_rating: true,
+  risk_details: true
+};
+async function detectDevicesColumns() {
+  if (!supabase) return;
+  try {
+    const { error: regErr } = await supabase.from("devices").select("registered_at").limit(1);
+    if (regErr) {
+      console.warn('Supabase: Column "registered_at" not detected in "devices" table. Disabling sync for this column.');
+      devicesColumns.registered_at = false;
+    }
+  } catch (e) {
+    devicesColumns.registered_at = false;
+  }
+  try {
+    const { error: ratingErr } = await supabase.from("devices").select("risk_rating").limit(1);
+    if (ratingErr) {
+      console.warn('Supabase: Column "risk_rating" not detected in "devices" table. Disabling sync for this column.');
+      devicesColumns.risk_rating = false;
+    }
+  } catch (e) {
+    devicesColumns.risk_rating = false;
+  }
+  try {
+    const { error: detailsErr } = await supabase.from("devices").select("risk_details").limit(1);
+    if (detailsErr) {
+      console.warn('Supabase: Column "risk_details" not detected in "devices" table. Disabling sync for this column.');
+      devicesColumns.risk_details = false;
+    }
+  } catch (e) {
+    devicesColumns.risk_details = false;
+  }
+}
 function mapDeviceToDb(d) {
   const db = {};
   if (d.id !== void 0) db.id = d.id;
@@ -79,9 +119,9 @@ function mapDeviceToDb(d) {
   if (d.category !== void 0) db.category = d.category;
   if (d.lastActive !== void 0) db.last_active = d.lastActive;
   if (d.isBlockedByPolicy !== void 0) db.is_blocked_by_policy = d.isBlockedByPolicy;
-  if (d.registeredAt !== void 0) db.registered_at = d.registeredAt;
-  if (d.riskRating !== void 0) db.risk_rating = d.riskRating;
-  if (d.riskDetails !== void 0) db.risk_details = d.riskDetails;
+  if (d.registeredAt !== void 0 && devicesColumns.registered_at) db.registered_at = d.registeredAt;
+  if (d.riskRating !== void 0 && devicesColumns.risk_rating) db.risk_rating = d.riskRating;
+  if (d.riskDetails !== void 0 && devicesColumns.risk_details) db.risk_details = d.riskDetails;
   return db;
 }
 function mapScheduleToFront(s) {
@@ -308,6 +348,39 @@ var logs = [
     severity: "alert"
   }
 ];
+var STORAGE_FILE = import_path.default.join(process.cwd(), "local_storage.json");
+function saveLocalState() {
+  try {
+    const data = {
+      currentNetwork,
+      devices,
+      schedules,
+      logs
+    };
+    import_fs.default.writeFileSync(STORAGE_FILE, JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error saving state to local_storage.json:", err);
+  }
+}
+function loadLocalState() {
+  try {
+    if (import_fs.default.existsSync(STORAGE_FILE)) {
+      const content = import_fs.default.readFileSync(STORAGE_FILE, "utf-8");
+      const data = JSON.parse(content);
+      if (data.currentNetwork) currentNetwork = data.currentNetwork;
+      if (data.devices) devices = data.devices;
+      if (data.schedules) schedules = data.schedules;
+      if (data.logs) logs = data.logs;
+      console.log("Successfully loaded persisted state from local_storage.json");
+    } else {
+      console.log("No local_storage.json found. Creating initial seed file...");
+      saveLocalState();
+    }
+  } catch (err) {
+    console.error("Error loading state from local_storage.json:", err);
+  }
+}
+loadLocalState();
 async function addLog(deviceName, deviceMac, type, details, severity) {
   const newLog = {
     id: `log-${Date.now()}-${Math.floor(Math.random() * 1050)}`,
@@ -330,6 +403,7 @@ async function addLog(deviceName, deviceMac, type, details, severity) {
       console.error("Failed to write log to Supabase:", err);
     }
   }
+  saveLocalState();
 }
 app.get("/api/network", (req, res) => {
   res.json(currentNetwork);
@@ -338,6 +412,7 @@ app.post("/api/network", (req, res) => {
   const { name, ssid } = req.body;
   if (name) currentNetwork.name = name;
   if (ssid) currentNetwork.ssid = ssid;
+  saveLocalState();
   res.json({ success: true, network: currentNetwork });
 });
 app.get("/api/devices", (req, res) => {
@@ -387,6 +462,7 @@ app.post("/api/devices/modify", async (req, res) => {
       console.error("Failed to sync device edit onto Supabase:", err);
     }
   }
+  saveLocalState();
   res.json({ success: true, device: dev });
 });
 app.post("/api/devices", async (req, res) => {
@@ -427,6 +503,7 @@ app.post("/api/devices", async (req, res) => {
       console.error("Failed to sync new device details to Supabase:", err);
     }
   }
+  saveLocalState();
   res.json({ success: true, device: newDev });
 });
 app.delete("/api/devices/:id", async (req, res) => {
@@ -436,20 +513,37 @@ app.delete("/api/devices/:id", async (req, res) => {
     return res.status(404).json({ error: "Device target not found inside management manifest." });
   }
   const dev = devices[devIndex];
+  if (isDbActive && supabase) {
+    try {
+      const { error: schedError } = await supabase.from("schedules").delete().eq("device_id", id);
+      if (schedError) {
+        console.error("Failed to clear schedules from Supabase during device delete:", schedError);
+        return res.status(500).json({
+          error: `Failed to remove related schedules from Supabase database: ${schedError.message}`,
+          details: schedError
+        });
+      }
+      const { error: devError } = await supabase.from("devices").delete().eq("id", id);
+      if (devError) {
+        console.error("Failed to delete device row from Supabase:", devError);
+        return res.status(500).json({
+          error: `Failed to remove device from Supabase database (Check RLS Policies or Service Role Config): ${devError.message}`,
+          details: devError
+        });
+      }
+      console.log(`Successfully deleted device ${dev.name} (${id}) from Supabase database.`);
+    } catch (err) {
+      console.error("Failed to sync device lease purging on Supabase:", err);
+      return res.status(500).json({
+        error: `Database exception during deletion sync: ${err.message || err}`,
+        details: err
+      });
+    }
+  }
   devices.splice(devIndex, 1);
   schedules = schedules.filter((s) => s.deviceId !== id);
   await addLog(dev.name, dev.mac, "disconnection", `Device lease physically removed or cleared by administrator.`, "info");
-  if (isDbActive && supabase) {
-    try {
-      await supabase.from("schedules").delete().eq("device_id", id);
-      const { error } = await supabase.from("devices").delete().eq("id", id);
-      if (error) {
-        console.error("Failed to delete device row from Supabase:", error);
-      }
-    } catch (err) {
-      console.error("Failed to sync device lease purging on Supabase:", err);
-    }
-  }
+  saveLocalState();
   res.json({ success: true });
 });
 app.get("/api/schedules", (req, res) => {
@@ -484,6 +578,7 @@ app.post("/api/schedules", async (req, res) => {
       console.error("Failed to insert schedule onto Supabase:", err);
     }
   }
+  saveLocalState();
   res.json({ success: true, schedule: newSched });
 });
 app.delete("/api/schedules/:id", async (req, res) => {
@@ -506,6 +601,7 @@ app.delete("/api/schedules/:id", async (req, res) => {
         console.error("Failed to sync schedule deletion onto Supabase:", err);
       }
     }
+    saveLocalState();
     return res.json({ success: true });
   }
   res.status(404).json({ error: "Schedule trigger not found." });
@@ -530,6 +626,7 @@ app.post("/api/schedules/toggle", async (req, res) => {
         console.error("Failed to sync toggle change onto Supabase:", err);
       }
     }
+    saveLocalState();
     return res.json({ success: true, schedule: s });
   }
   res.status(404).json({ error: "Schedule trigger not found." });
@@ -604,6 +701,7 @@ app.post("/api/network/scan", async (req, res) => {
       console.error("Failed to sync scans onto Supabase:", err);
     }
   }
+  saveLocalState();
   res.json({ success: true, devices });
 });
 app.post("/api/gemini/analyze-security", async (req, res) => {
@@ -756,6 +854,7 @@ async function syncAndLoadWithSupabase() {
     return;
   }
   try {
+    await detectDevicesColumns();
     const { data: test, error: testErr } = await supabase.from("devices").select("id").limit(1);
     if (testErr) {
       if (testErr.code === "PGRST116" || testErr.code === "42P01" || testErr.message?.includes("relation") || testErr.message?.includes("does not exist")) {
@@ -770,42 +869,28 @@ async function syncAndLoadWithSupabase() {
     if (devRows && devRows.length > 0) {
       devices = devRows.map(mapDeviceToFront);
     } else {
-      console.log("Seeding empty Supabase devices table with initial device manifest...");
-      const seedDevs = devices.map(mapDeviceToDb);
-      const { error: seedErr } = await supabase.from("devices").insert(seedDevs);
-      if (seedErr) {
-        console.error("Failed to seed Supabase devices:", JSON.stringify(seedErr, null, 2));
-        throw new Error(`Failed to seed Supabase devices: ${seedErr.message || JSON.stringify(seedErr)}`);
-      }
+      console.log("Supabase devices table is empty.");
+      devices = [];
     }
     const { data: schedRows, error: schedErr } = await supabase.from("schedules").select("*");
     if (schedErr) throw schedErr;
     if (schedRows && schedRows.length > 0) {
       schedules = schedRows.map(mapScheduleToFront);
     } else {
-      console.log("Seeding empty Supabase schedules table with bedtime lockouts...");
-      const seedScheds = schedules.map(mapScheduleToDb);
-      const { error: seedErr } = await supabase.from("schedules").insert(seedScheds);
-      if (seedErr) {
-        console.error("Failed to seed Supabase schedules:", JSON.stringify(seedErr, null, 2));
-        throw new Error(`Failed to seed Supabase schedules: ${seedErr.message || JSON.stringify(seedErr)}`);
-      }
+      console.log("Supabase schedules table is empty.");
+      schedules = [];
     }
     const { data: logRows, error: logErr } = await supabase.from("activity_logs").select("*");
     if (logErr) throw logErr;
     if (logRows && logRows.length > 0) {
       logs = logRows.map(mapLogToFront);
     } else {
-      console.log("Seeding empty Supabase activity_logs table...");
-      const seedLogs = logs.map(mapLogToDb);
-      const { error: seedErr } = await supabase.from("activity_logs").insert(seedLogs);
-      if (seedErr) {
-        console.error("Failed to seed Supabase logs:", JSON.stringify(seedErr, null, 2));
-        throw new Error(`Failed to seed Supabase logs: ${seedErr.message || JSON.stringify(seedErr)}`);
-      }
+      console.log("Supabase activity_logs table is empty.");
+      logs = [];
     }
     isDbActive = true;
     lastDbError = null;
+    saveLocalState();
     console.log("\u26A1 Successfully fully synchronized state with REAL Supabase DB!");
   } catch (err) {
     console.error("Failed loading dataset from Supabase:", err.message || err);
