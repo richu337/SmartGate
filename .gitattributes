@@ -1,10 +1,10 @@
-# Force Git to treat .jar files as binary (do not perform CRLF line ending conversions)
+# Ensure standard Unix line endings for scripts/code
+* text=auto eol=lf
+
+# Force Git to treat binary files as binary (do not perform CRLF line ending conversions)
 *.jar binary
 *.png binary
 *.jpg binary
 *.jpeg binary
 *.gif binary
 *.ico binary
-
-# Ensure standard Unix line endings for scripts/code
-* text=auto eol=lf
