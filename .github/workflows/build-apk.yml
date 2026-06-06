@@ -42,6 +42,11 @@ jobs:
       - name: Sync Assets to Android Project
         run: npx cap sync android
 
+      - name: Restore Pristine Gradle Wrapper (Prevents Git Corruption)
+        run: |
+          mkdir -p android/gradle/wrapper
+          curl -L -o android/gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar
+
       - name: build APK with Gradle Wrapper
         run: |
           cd android
