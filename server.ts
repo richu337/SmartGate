@@ -1143,19 +1143,26 @@ app.post('/api/supabase/recheck', async (req, res) => {
 
 // Setup Express Static Assets & Vite Integration
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  // Robust production mode detection (checks environment value, if run from dist file, or if source isn't available)
+  const isProd = 
+    process.env.NODE_ENV === 'production' || 
+    (typeof __dirname !== 'undefined' && __dirname.includes('dist')) ||
+    !fs.existsSync(path.join(process.cwd(), 'server.ts'));
+
+  if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-    console.log('Mounted Vite development server middleware.');
+    console.log('Mounted Vite development server middleware (Development Mode).');
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
+    console.log('Serving compiled static assets from dist/ directory (Production Mode).');
   }
 
   // Load backend rows from real Supabase DB if enabled on bootup!
