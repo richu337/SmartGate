@@ -1144,10 +1144,17 @@ app.post('/api/supabase/recheck', async (req, res) => {
 // Setup Express Static Assets & Vite Integration
 async function startServer() {
   // Robust production mode detection (checks environment value, if run from dist file, or if source isn't available)
-  const isProd = 
+  let isProd = 
     process.env.NODE_ENV === 'production' || 
     (typeof __dirname !== 'undefined' && __dirname.includes('dist')) ||
     !fs.existsSync(path.join(process.cwd(), 'server.ts'));
+
+  // Force development mode if we are executing server.ts directly with tsx or node
+  if (process.argv[1] && (process.argv[1].endsWith('server.ts') || process.argv[1].includes('server.ts'))) {
+    isProd = false;
+  }
+
+  console.log(`Starting server: isProd = ${isProd} (NODE_ENV = ${process.env.NODE_ENV || 'undefined'}, executed file = ${process.argv[1] || 'undefined'})`);
 
   if (!isProd) {
     const vite = await createViteServer({
